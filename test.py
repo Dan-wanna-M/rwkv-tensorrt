@@ -1,6 +1,4 @@
 import torch
-
-
 def initONNXFile(path, useAllAvailableProviders=False):
     import onnxruntime as rt
 
@@ -8,11 +6,10 @@ def initONNXFile(path, useAllAvailableProviders=False):
     sess_options = rt.SessionOptions()
 
     print(rt.get_available_providers())
-    if (not useAllAvailableProviders):
+    if(not useAllAvailableProviders):
         import inquirer
     providers = inquirer.checkbox(
-        "Select execution providers(use space bar to select checkboxes)",
-        choices=rt.get_available_providers()) if not useAllAvailableProviders else rt.get_available_providers()
+        "Select execution providers(use space bar to select checkboxes)", choices=rt.get_available_providers()) if not useAllAvailableProviders else rt.get_available_providers()
     print(providers)
 
     sess = rt.InferenceSession(
@@ -33,11 +30,10 @@ def initONNXFile(path, useAllAvailableProviders=False):
     elif typenum == "tensor(float16)":
         typenum = np.float16
     state_shape = sess.get_inputs()[1].shape
-    isUnsafeWKV = state_shape[0] < 5 * layers
+    isUnsafeWKV = state_shape[0] < 5*layers
     print(f"isUnsafeWKV: {isUnsafeWKV}")
-    emptyState = np.array((([[0.01] * embed, [0.01] * embed, [0.01] * embed, [
-        0.01] * embed] + ([[-1e30] * embed] if not isUnsafeWKV else []))) * layers, typenum)
-
+    emptyState = np.array((([[0.01]*embed, [0.01]*embed, [0.01]*embed, [
+            0.01]*embed]+([[-1e30]*embed] if not isUnsafeWKV else [])))*layers, typenum)
     class InterOp():
 
         RnnOnly = True
@@ -56,20 +52,20 @@ def initONNXFile(path, useAllAvailableProviders=False):
 
             # create input dict
             inputs[input_names[0]] = np.array([xi], dtype=np.int32)
-            for i in range(len(input_names) - 1):
-                inputs[input_names[i + 1]] = statei[i]
+            for i in range(len(input_names)-1):
+                inputs[input_names[i+1]] = statei[i]
             outputs = sess.run(output_names, inputs)
             # print(outputs[1][23])
-
+            print(input_names)
+            print(len(outputs[1:]))
             return outputs[0], outputs[1:]
-
+        
     model = InterOp()
 
     # emptyState = []
 
     print(isUnsafeWKV)
     return model, emptyState
-
 
 def npsample(ozut, temp: float = 1.0, top_p_usual: float = 0.8) -> int:
     import numpy as np
@@ -98,26 +94,22 @@ def npsample(ozut, temp: float = 1.0, top_p_usual: float = 0.8) -> int:
     mout = np.random.choice(a=len(probs), p=probs)
     return mout
 
-
 import inquirer
 # get all .onnx files in current directory
 import os
-
 files = [f for f in os.listdir('.') if os.path.isfile(f)]
 files = [f for f in files if f.endswith(".onnx")]
-model, state = initONNXFile(inquirer.list_input("Select model", choices=files))
+model, state = initONNXFile(inquirer.list_input("Select model", choices=files)) 
 
 from transformers import AutoTokenizer
-
 tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
 
 prompt = tokenizer.encode("User: Please describe an apple? Bot: Sure! an apple is")
 import tqdm
-
 for token in tqdm.tqdm(prompt[:-1]):
     if not isinstance(state, list):
         state = [state]
-    logits, state = model.forward(token, state)
+    logits, state = model.forward(token,state)
     print(logits)
 
 print("Loaded prompt.")
@@ -125,7 +117,7 @@ print("Loaded prompt.")
 for i in range(100):
     if not isinstance(state, list):
         state = [state]
-    logits, state = model.forward(prompt[-1], state)
-    prompt = prompt + [npsample(logits)]
-    print(tokenizer.decode(prompt[-1]), end="", flush=True)
+    logits, state = model.forward(prompt[-1],state)
+    prompt = prompt+[npsample(logits)]
+    print(tokenizer.decode(prompt[-1]),end="", flush=True)
 print(tokenizer.decode(prompt))
