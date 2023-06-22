@@ -1,3 +1,5 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "5"
 import tensorrt as trt
 
 TRT_LOGGER = trt.Logger(trt.Logger.INFO)
@@ -15,8 +17,7 @@ with trt.OnnxParser(network, TRT_LOGGER) as parser:
 # Build the TensorRT engine
 config = builder.create_builder_config()
 config.flags = 1<<int(trt.BuilderFlag.FP16)
-config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 6 * (2 ** 30))
-# config.set_tactic_sources(1<<int(trt.TacticSource.CUBLAS)|1<<int(trt.TacticSource.CUBLAS_LT))
+config.builder_optimization_level = 5
 engine_data = builder.build_serialized_network(network, config)
 
 # Serialize the engine to a file

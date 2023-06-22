@@ -1,7 +1,7 @@
-import opslist
+import onnx_opslist
 
 
-def RnnRWKV(ops: opslist.RWKVOnnxOps, *args):
+def RnnRWKV(ops: onnx_opslist.RWKVOnnxOps, *args):
     class myRWKV(ops.module):
 
         @ops.initfunc
@@ -180,7 +180,7 @@ def convert_model(path, dtype):
     layers = len(
         list(filter(lambda x: "blocks" in x and "ln1.bias" in x, w.keys())))
 
-    ops = opslist.RWKVOnnxOps(layers, dims, dtype=dtype, useSafeWKV=use_safe_wkv, externalData=use_external_data,
+    ops = onnx_opslist.RWKVOnnxOps(layers, dims, dtype=dtype, useSafeWKV=use_safe_wkv, externalData=use_external_data,
                               splitExternalData=splitExternalData, fp32inout=fp32inout)
 
     RnnRWKV(ops, w)
