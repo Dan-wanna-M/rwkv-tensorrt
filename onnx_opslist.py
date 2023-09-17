@@ -3,31 +3,36 @@ import numpy as np
 
 class RWKVOnnxOps():
 
-    def __init__(self, layers, embed, useSafeWKV = True, externalData = True, splitExternalData = False,fp32inout=True, quantized = False, dtype=None):
+    def __init__(self, layers, embed, opsVersion = 15, useSafeWKV = True, externalData = True, splitExternalData = False,fp32inout=True, seq_mode=False, seq_length=256, quantized = False, *args, dtype=None, **kwargs):
         import onnx
         self.n_layers = layers
         self.n_embed = embed
-        self.useSafeWKV = useSafeWKV
+
         print("embed ", embed)
 
         dtype = onnx.TensorProto.FLOAT if dtype == np.float32 else onnx.TensorProto.FLOAT16 if dtype == np.float16 else onnx.TensorProto.BFLOAT16 if dtype == np.bfloat16 else onnx.TensorProto.FLOAT
         nptype = np.float32 if dtype == onnx.TensorProto.FLOAT else np.float16 if dtype == onnx.TensorProto.FLOAT16 else np.float16 if dtype == onnx.TensorProto.BFLOAT16 else np.float32
 
         self.nm = 0
-        exportname = f"RWKV_{layers}_{embed}_{'32' if dtype == onnx.TensorProto.FLOAT else '16'}.onnx"
-        externalname = f"RWKV_{layers}_{embed}_{'32' if dtype == onnx.TensorProto.FLOAT else '16'}.bin"
+        exportname = f"RWKV_{layers}_{embed}_{'32' if dtype == onnx.TensorProto.FLOAT else '16'}_{opsVersion}{'_unsafe' if not useSafeWKV else ''}{'_seq' if seq_mode else ''}.onnx"
+        externalname = f"RWKV_{layers}_{embed}_{'32' if dtype == onnx.TensorProto.FLOAT else '16'}_{opsVersion}{'_unsafe' if not useSafeWKV else ''}{'_seq' if seq_mode else ''}"
 
         # remove old files
         import os
         if os.path.exists(exportname):
             os.remove(exportname)
-        if os.path.exists(externalname):
-            os.remove(externalname)
+        if os.path.exists(externalname + ".bin"):
+            os.remove(externalname + ".bin")
 
         self.TensorList = []
         self.NodeList = []
 
-        def initTensor(x, isfp32=False, exname=""):
+        self.useSafeWKV = useSafeWKV
+        self.seq_mode = seq_mode
+        self.seq_length = seq_length
+
+        def initTensor(x, isfp32 = False, exname = ""):
+
             npdtype = np.float32 if (isfp32 and fp32inout) else nptype
             ddtype = onnx.TensorProto.FLOAT if (isfp32 and fp32inout) else dtype
             name = f"PreTrainedTensor_{self.nm}"
@@ -46,11 +51,16 @@ class RWKVOnnxOps():
                 raw=True
             )
 
-            onnx.external_data_helper.set_external_data(
-                rrx,
-                location=externalname,
 
-            )
+
+            if externalData:
+                if not splitExternalData:
+                    exname = ""
+                onnx.external_data_helper.set_external_data(
+                    rrx,
+                    location=externalname+exname+".bin",
+
+                )
 
             self.TensorList.append(rrx)
             return name
@@ -146,16 +156,14 @@ class RWKVOnnxOps():
 
         self.exp = exp
 
-        def stack(x, fp32=False, exname=""):
+        def stack(x, fp32 = False, exname = ""):
             return [initTensor(r, fp32, exname) for r in x]
 
         self.stack = stack
 
-        def matvec(x, y, outputfp32=False, is_output=False):
-            if is_output:
-                name = "output_token"
-            else:
-                name = f"matvec_{self.nm}_out"
+        def matvec(x, y, outputfp32 = False):
+            name = f"matvec_{self.nm}_out"
+            oname = f"matvec_g_{self.nm}_out"
             self.nm += 1
             node = onnx.helper.make_node(
                 'MatMul',
@@ -211,6 +219,7 @@ class RWKVOnnxOps():
             self.NodeList.append(node)
 
             return name
+        self.squeeze = squeeze
 
         def add(x, y):
 
@@ -241,9 +250,10 @@ class RWKVOnnxOps():
 
         self.subtract = sub
 
-        self.one = initTensor([1.0] * embed)
-        self.margins = initTensor([0.00001] * embed, True)
-        self.margins16 = initTensor([0.00001] * embed)
+        self.one = initTensor([1.0]*embed)
+        self.margins = initTensor([0.00001]*embed, True)
+        self.margins16 = initTensor([0.00001]*embed)
+        
 
         def lerpx(x, y, z):
             return self.add(x, self.multiply(self.subtract(y, x), z))
@@ -299,7 +309,7 @@ class RWKVOnnxOps():
 
         self.divide = divide
 
-        def layernorm(x, w, b):
+        def layernorm17(x, w, b):
             name = f"layernorm_{self.nm}_out"
             self.nm += 1
             node = onnx.helper.make_node(
@@ -309,9 +319,16 @@ class RWKVOnnxOps():
             )
             self.NodeList.append(node)
 
-            return name
+            return name 
+        # ort 15 does not support layernorm
 
-        self.layernorm = layernorm
+        def layernorm(x, w, b):
+            xee2 = self.subtract(x,self.mean(x))
+            x2 = self.add(self.sqrt(self.add(self.mean(self.multiply(xee2,xee2)), self.margins16)), self.margins16)
+            return self.add(self.multiply(w, self.divide(xee2, x2)), b)
+
+
+        self.layernorm = layernorm if opsVersion < 17 else layernorm17
 
         def getIndex(x, y):
             name = f"getIndex_{self.nm}_out"
@@ -352,7 +369,6 @@ class RWKVOnnxOps():
             self.NodeList.append(node)
 
             return name
-
         self.logistical = logistic
 
         def maximum(x, y):
@@ -371,109 +387,152 @@ class RWKVOnnxOps():
 
         self.getIndex = getIndex
 
+        def unsqueeze(x, axes=0):
+            axes_name = f"unsq_axes_init_{self.nm}"
+            self.nm += 1
+            axes_init_node = onnx.helper.make_tensor(
+                axes_name,
+                data_type=onnx.TensorProto.INT64,
+                dims=(1,),
+                vals=[axes]
+            )
+            name = f"unsqueeze_{self.nm}_out"
+            self.nm += 1
+            node = onnx.helper.make_node(
+                "Unsqueeze",
+                inputs=[x, axes_name],
+                outputs=[name],
+            )
+            self.TensorList.append(axes_init_node)
+            self.NodeList.append(node)
+            return name
+        self.unsqueeze = unsqueeze
+
+        def slice(x, axes=0, starts=0, ends=-1):
+            axes_name = f"slice_axes_init_{self.nm}"
+            self.nm += 1
+            axes_init_node = onnx.helper.make_tensor(
+                axes_name,
+                data_type=onnx.TensorProto.INT32,
+                dims=(1,),
+                vals=[axes]
+            )
+            start_name = f"slice_start_init_{self.nm}"
+            self.nm += 1
+            start_init_node = onnx.helper.make_tensor(
+                start_name,
+                data_type=onnx.TensorProto.INT32,
+                dims=(1,),
+                vals=[starts]
+            )
+            if ends is None:
+                end_name = None
+            else:
+                end_name = f"slice_end_init_{self.nm}"
+                self.nm += 1
+                end_init_node = onnx.helper.make_tensor(
+                    end_name,
+                    data_type=onnx.TensorProto.INT32,
+                    dims=(1,),
+                    vals=[ends]
+                )
+            name = f"slice_{self.nm}_out"
+            self.nm += 1
+            node = onnx.helper.make_node(
+                "Slice",
+                inputs=[x, start_name, end_name, axes_name],
+                outputs=[name],
+            )
+            self.TensorList.append(axes_init_node)
+            self.TensorList.append(start_init_node)
+            if end_name is not None:
+                self.TensorList.append(end_init_node)
+            self.NodeList.append(node)
+            return name
+        self.slice = slice
+
+        def concate(x, y, axis=0):
+            name = f"concate_{self.nm}_out"
+            self.nm += 1
+            node = onnx.helper.make_node(
+                "Concat",
+                inputs=[x, y],
+                outputs=[name],
+                axis=axis
+            )
+            self.NodeList.append(node)
+            return name
+        self.concate = concate
+
+        def seq_concate(X, length, axis=0):
+            name = f"seq_concate_{self.nm}_out"
+            self.nm += 1
+            node = onnx.helper.make_node(
+                "Concat",
+                inputs=[X[i] for i in range(length)],
+                outputs=[name],
+                axis=axis
+            )
+            self.NodeList.append(node)
+            return name
+        self.seq_concate = seq_concate
+
         # convert to float32
-        self.emptyState = np.array((([[0.00] * embed, [0.00] * embed, [0.00] * embed, [
-            0.00] * embed] + [[-1e30] * embed] if useSafeWKV else [])) * layers)
+        self.emptyState = np.array((([[0.01]*embed, [0.01]*embed, [0.01]*embed, [
+            0.01]*embed]+[[-1e30]*embed] if useSafeWKV else []))*layers)
         self.emptyState = np.array(self.emptyState)
         if dtype == onnx.TensorProto.FLOAT16 and not fp32inout:
             self.emptyState = self.emptyState.astype(np.float16)
-        print(self.emptyState)
 
         # self.zero = initTensor([0.0]*embed)
-        def reshape(x):
-            name = f"output_state"
-            self.nm += 1
-            node = onnx.helper.make_node(
-                'Reshape',
-                inputs=[x, "state_shape"],
-                outputs=[name],
-            )
-            self.NodeList.append(node)
-
-            return name
-
-        def concat(x):
-            name = f"concat{self.nm}_out"
-            self.nm += 1
-            node = onnx.helper.make_node(
-                'Concat',
-                inputs=[*x],
-                outputs=[name],
-                axis=0,
-            )
-
-            self.NodeList.append(node)
-
-            return reshape(name)
-
-        def getStateIndex(x, y):
-            name = f"getStateIndex_{self.nm}_out"
-            self.nm += 1
-            node = onnx.helper.make_node(
-                'Gather',
-                inputs=[x, y],
-                outputs=[name]
-            )
-            self.NodeList.append(node)
-
-            return name
-
-        self.getStateIndex = getStateIndex
-        self.concat = concat
-        self.reshape = reshape
 
         def ppm(x):
-            inputtensor = onnx.helper.make_tensor_value_info("input_token",
+            inputtensor = onnx.helper.make_tensor_value_info("input0",
                                                              onnx.TensorProto.INT32,
-                                                             [1]), "input_token"
+                                                             [1] if not self.seq_mode else [self.seq_length]), "input0"
 
-            # emptyState = list(map(lambda x: (onnx.helper.make_tensor_value_info("instate"+str(x),
-            #                                                                     dtype,
-            #                                                                     [embed]), "instate"+str(x)), range(5*layers)))
-            emptyState = onnx.helper.make_tensor_value_info("input_state",
-                                                            onnx.TensorProto.FLOAT if fp32inout else dtype,
-                                                            [5 * layers, embed]), "input_state"
-            print(inputtensor[1], emptyState[1])
-
-            outs = x.forward(
-                inputtensor[1], emptyState[1])
-            for i in range(5 * layers):
-                self.TensorList.append(onnx.helper.make_tensor(str(i), onnx.TensorProto.INT32, [], [i]))
-            self.TensorList.append(
-                onnx.helper.make_tensor('state_shape', onnx.TensorProto.INT64, [2], [5 * layers, embed]))
+            emptyState = list(map(lambda x: (onnx.helper.make_tensor_value_info("instate"+str(x),
+                                                                                onnx.TensorProto.FLOAT if fp32inout else dtype,
+                                                                                [embed]), "instate"+str(x)), range((4+useSafeWKV)*layers)))
+            if self.seq_mode:
+                outs = x.forwardSeq(
+                    inputtensor[1], list(map(lambda x: x[1], emptyState)))
+            else:
+                outs = x.forward(
+                    inputtensor[1], list(map(lambda x: x[1], emptyState)))
             print(self.TensorList.__len__())
             print(self.NodeList.__len__())
             print(outs)
             logits = onnx.helper.make_tensor_value_info(outs[0],
                                                         onnx.TensorProto.FLOAT if fp32inout else dtype,
-                                                        [50277])
-            print("logits generated")
-            state = onnx.helper.make_tensor_value_info(outs[1],
-                                                       onnx.TensorProto.FLOAT if fp32inout else dtype,
-                                                       [5 * layers, embed])
-            print("state generated.")
+                                                        [50277] if not self.seq_mode else [self.seq_length, 50277])
+            state = list(map(lambda x: onnx.helper.make_tensor_value_info(x,
+                                                                          onnx.TensorProto.FLOAT if fp32inout else dtype,
+                                                                          [embed]), outs[1]))
+
             # Create the graph (GraphProto)
             graph_def = onnx.helper.make_graph(
                 nodes=self.NodeList,  # The list of nodes in the graph.
                 name="RWKV",
                 # Graph input
 
-                inputs=[inputtensor[0], emptyState[0]],
+                inputs=[inputtensor[0], * \
+                        list(map(lambda x:x[0], emptyState))],
 
-                outputs=[logits, state],  # Graph output
+                outputs=[logits, *state],  # Graph output
 
                 initializer=self.TensorList,  # initializer
 
                 # did not work, needs to be external
 
             )
-            print("graph def generated.")
+
             modelDef = onnx.helper.make_model(
                 graph_def, producer_name="rwkvstic",
 
             )
-            print("modelDef generated.")
-            modelDef.opset_import[0].version = 17
+
+            modelDef.opset_import[0].version = opsVersion
 
             onnx.save(modelDef, exportname)
 

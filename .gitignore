@@ -2,3 +2,4 @@
 *.onnx
 pycache
 *.pth
+__pycache__/
